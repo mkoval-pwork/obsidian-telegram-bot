@@ -1,0 +1,15 @@
+[Unit]
+Description=Obsidian Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your_user
+WorkingDirectory=/path/to/ObsidianTelegramBot
+Environment="PATH=/path/to/ObsidianTelegramBot/venv/bin"
+ExecStart=/path/to/ObsidianTelegramBot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
