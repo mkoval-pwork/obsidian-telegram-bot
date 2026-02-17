@@ -5,6 +5,9 @@ import asyncio
 import logging
 import os
 import tempfile
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -20,6 +23,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Константы для голосовых сообщений
+MAX_VOICE_DURATION = 600  # 10 минут в секундах
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 МБ (лимит OpenAI Whisper API)
+PREVIEW_LENGTH = 100  # Длина превью транскрипции в символах
+MAX_VOICE_PER_HOUR = 10  # Максимум голосовых сообщений в час
+MAX_RETRIES = 3  # Количество попыток для API запросов
+
 # Инициализация бота и диспетчера
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -28,9 +38,12 @@ dp = Dispatcher()
 github_handler = GitHubHandler()
 
 # Инициализация OpenAI клиента (если API key указан)
-openai_client = None
+openai_client: Optional[OpenAI] = None
 if config.OPENAI_API_KEY:
     openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+# Rate limiting для голосовых сообщений
+voice_requests = defaultdict(list)
 
 
 def is_authorized(user_id: int) -> bool:
@@ -44,6 +57,79 @@ def is_authorized(user_id: int) -> bool:
         bool: True если пользователь авторизован
     """
     return user_id == config.ALLOWED_USER_ID
+
+
+def check_voice_rate_limit(user_id: int) -> tuple[bool, int]:
+    """
+    Проверка rate limit для голосовых сообщений
+    
+    Args:
+        user_id: ID пользователя Telegram
+        
+    Returns:
+        tuple: (разрешено, количество оставшихся запросов)
+    """
+    now = datetime.now()
+    hour_ago = now - timedelta(hours=1)
+    
+    # Очищаем старые запросы
+    voice_requests[user_id] = [t for t in voice_requests[user_id] if t > hour_ago]
+    
+    current_count = len(voice_requests[user_id])
+    
+    if current_count >= MAX_VOICE_PER_HOUR:
+        return False, 0
+    
+    # Добавляем текущий запрос
+    voice_requests[user_id].append(now)
+    remaining = MAX_VOICE_PER_HOUR - current_count - 1
+    
+    return True, remaining
+
+
+async def transcribe_audio_with_retry(audio_file_path: str) -> tuple[bool, str, str]:
+    """
+    Транскрибация аудио с повторными попытками
+    
+    Args:
+        audio_file_path: Путь к аудио файлу
+        
+    Returns:
+        tuple: (успех, транскрибированный текст, определенный язык)
+    """
+    last_error = None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            with open(audio_file_path, 'rb') as audio_file:
+                # Используем verbose_json для получения информации о языке
+                transcript = openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="verbose_json"
+                )
+            
+            # Получаем транскрипцию и язык
+            text = transcript.text
+            language = getattr(transcript, 'language', 'unknown')
+            
+            logger.info(f"Транскрипция успешна на попытке {attempt + 1}. Язык: {language}")
+            return True, text, language
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Попытка {attempt + 1}/{MAX_RETRIES} не удалась: {e}")
+            
+            if attempt < MAX_RETRIES - 1:
+                # Экспоненциальная задержка: 2^attempt секунд
+                wait_time = 2 ** attempt
+                logger.info(f"Повторная попытка через {wait_time}с...")
+                await asyncio.sleep(wait_time)
+    
+    # Все попытки исчерпаны
+    error_msg = f"Не удалось транскрибировать после {MAX_RETRIES} попыток: {str(last_error)}"
+    logger.error(error_msg)
+    return False, "", "unknown"
 
 
 @dp.message(Command("start"))
@@ -127,18 +213,41 @@ async def handle_voice_message(message: Message):
         logger.error("Попытка транскрибировать голосовое сообщение без OpenAI API key")
         return
     
-    logger.info(f"Получено голосовое сообщение от пользователя {message.from_user.id}")
+    # Проверка rate limit
+    allowed, remaining = check_voice_rate_limit(message.from_user.id)
+    if not allowed:
+        await message.answer(
+            f"⏸ Превышен лимит голосовых сообщений.\n"
+            f"Максимум: {MAX_VOICE_PER_HOUR} сообщений в час.\n"
+            f"Попробуйте позже."
+        )
+        logger.warning(f"Rate limit превышен для пользователя {message.from_user.id}")
+        return
+    
+    logger.info(
+        f"Получено голосовое сообщение от пользователя {message.from_user.id}. "
+        f"Осталось запросов: {remaining}"
+    )
+    
+    # Получение информации о голосовом файле
+    voice = message.voice
+    duration = voice.duration
+    
+    # Проверка длительности
+    if duration > MAX_VOICE_DURATION:
+        await message.answer(
+            f"❌ Голосовое сообщение слишком длинное ({duration}с).\n"
+            f"Максимальная длительность: {MAX_VOICE_DURATION}с ({MAX_VOICE_DURATION // 60} минут)."
+        )
+        logger.warning(f"Голосовое сообщение слишком длинное: {duration}с")
+        return
     
     # Отправка уведомления о начале обработки
-    status_message = await message.answer("🎤 Транскрибирую голосовое сообщение...")
+    status_message = await message.answer("⬇️ Скачиваю голосовое сообщение...")
     
     temp_file_path = None
     
     try:
-        # Получение информации о голосовом файле
-        voice = message.voice
-        duration = voice.duration
-        
         # Создание временного файла для сохранения аудио
         with tempfile.NamedTemporaryFile(delete=False, suffix='.ogg') as temp_file:
             temp_file_path = temp_file.name
@@ -147,19 +256,33 @@ async def handle_voice_message(message: Message):
             await bot.download(voice.file_id, destination=temp_file_path)
             logger.info(f"Голосовое сообщение скачано: {temp_file_path}")
         
+        # Проверка размера файла
+        file_size = os.path.getsize(temp_file_path)
+        if file_size > MAX_FILE_SIZE:
+            await status_message.edit_text(
+                f"❌ Файл слишком большой ({file_size / 1024 / 1024:.1f} МБ).\n"
+                f"Максимальный размер: {MAX_FILE_SIZE / 1024 / 1024:.0f} МБ."
+            )
+            logger.warning(f"Файл слишком большой: {file_size} bytes")
+            return
+        
         # Обновление статуса
         await status_message.edit_text("🔄 Распознаю речь...")
         
-        # Транскрибация через OpenAI Whisper API
-        with open(temp_file_path, 'rb') as audio_file:
-            transcript = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="ru"  # Можно добавить автоопределение языка
-            )
+        # Транскрибация через OpenAI Whisper API с retry
+        success, transcribed_text, detected_language = await transcribe_audio_with_retry(temp_file_path)
         
-        transcribed_text = transcript.text
-        logger.info(f"Транскрипция выполнена успешно. Длина текста: {len(transcribed_text)}")
+        if not success:
+            await status_message.edit_text(
+                "❌ Не удалось распознать речь после нескольких попыток.\n"
+                "Попробуйте позже или отправьте более чёткую запись."
+            )
+            return
+        
+        logger.info(
+            f"Транскрипция выполнена успешно. Язык: {detected_language}, "
+            f"Длина текста: {len(transcribed_text)}"
+        )
         
         # Обновление статуса
         await status_message.edit_text("💾 Сохраняю заметку...")
@@ -168,16 +291,22 @@ async def handle_voice_message(message: Message):
         success, result_message = github_handler.create_voice_note(
             transcribed_text=transcribed_text,
             duration=duration,
-            language="ru"
+            language=detected_language
         )
         
         # Формирование итогового сообщения с превью транскрипции
         if success:
-            preview = transcribed_text[:100] + "..." if len(transcribed_text) > 100 else transcribed_text
+            preview = (
+                transcribed_text[:PREVIEW_LENGTH] + "..." 
+                if len(transcribed_text) > PREVIEW_LENGTH 
+                else transcribed_text
+            )
             final_message = (
                 f"{result_message}\n\n"
                 f"📝 Транскрипция:\n{preview}\n\n"
-                f"⏱ Длительность: {duration}с"
+                f"🌍 Язык: {detected_language}\n"
+                f"⏱ Длительность: {duration}с\n"
+                f"📊 Осталось запросов: {remaining}/{MAX_VOICE_PER_HOUR}"
             )
         else:
             final_message = result_message
