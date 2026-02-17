@@ -50,7 +50,7 @@ class GitHubHandler:
     
     def create_note(self, message_text: str) -> tuple[bool, str]:
         """
-        Создание заметки в GitHub репозитории
+        Создание заметки в GitHub репозитории (добавление в дневной файл)
         
         Args:
             message_text: Текст сообщения из Telegram
@@ -66,34 +66,65 @@ class GitHubHandler:
             # Получение текущего времени
             now = datetime.now()
             
-            # Формирование имени файла: YYYY-MM-DD_HHmmss.md
-            filename = now.strftime("%Y-%m-%d_%H%M%S.md")
-            
-            # Формирование пути к файлу
+            # Формирование имени файла: YYYY-MM-DD.md (один файл на день)
+            filename = now.strftime("%Y-%m-%d.md")
             file_path = f"{config.INBOX_PATH}/{filename}"
             
-            # Формирование YAML frontmatter
-            date_formatted = now.strftime("%Y-%m-%d %H:%M")
+            # Формирование заголовка с временем для новой заметки
+            time_formatted = now.strftime("%H:%M")
+            new_note = f"\n## {time_formatted}\n\n{message_text}\n"
             
-            # Формирование содержимого файла
-            content = f"""---
+            # Проверка существования файла
+            try:
+                # Файл существует - получаем его содержимое
+                file_content = self.repo.get_contents(file_path, ref="main")
+                existing_content = file_content.decoded_content.decode('utf-8')
+                
+                # Добавляем новую заметку в конец файла
+                updated_content = existing_content + new_note
+                
+                # Обновляем файл
+                commit_message = f"Add note to {filename} at {time_formatted}"
+                self.repo.update_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=updated_content,
+                    sha=file_content.sha,
+                    branch="main"
+                )
+                
+                return True, f"✅ Added to {filename}"
+                
+            except GithubException as e:
+                if e.status == 404:
+                    # Файл не существует - создаём новый
+                    date_formatted = now.strftime("%Y-%m-%d")
+                    date_display = now.strftime("%d.%m.%Y")
+                    
+                    content = f"""---
 date: {date_formatted}
-tags: [inbox, telegram]
+tags: [inbox, telegram, daily]
 ---
+
+# Заметки за {date_display}
+
+## {time_formatted}
 
 {message_text}
 """
-            
-            # Создание файла в репозитории
-            commit_message = f"Add note from Telegram: {filename}"
-            self.repo.create_file(
-                path=file_path,
-                message=commit_message,
-                content=content,
-                branch="main"
-            )
-            
-            return True, f"✅ Saved to {config.INBOX_PATH}"
+                    
+                    commit_message = f"Create daily note: {filename}"
+                    self.repo.create_file(
+                        path=file_path,
+                        message=commit_message,
+                        content=content,
+                        branch="main"
+                    )
+                    
+                    return True, f"✅ Created {filename}"
+                else:
+                    # Другая ошибка - пробрасываем дальше
+                    raise
             
         except GithubException as e:
             error_message = f"❌ Ошибка GitHub API: {e.status} - {e.data.get('message', 'Unknown error')}"
@@ -106,7 +137,7 @@ tags: [inbox, telegram]
     
     def create_voice_note(self, transcribed_text: str, duration: int, language: str = "ru") -> tuple[bool, str]:
         """
-        Создание заметки из транскрибированного голосового сообщения
+        Создание заметки из транскрибированного голосового сообщения (добавление в дневной файл)
         
         Args:
             transcribed_text: Транскрибированный текст
@@ -124,42 +155,68 @@ tags: [inbox, telegram]
             # Получение текущего времени
             now = datetime.now()
             
-            # Формирование имени файла: YYYY-MM-DD_HHmmss_voice.md
-            filename = now.strftime("%Y-%m-%d_%H%M%S_voice.md")
-            
-            # Формирование пути к файлу
+            # Формирование имени файла: YYYY-MM-DD.md (один файл на день)
+            filename = now.strftime("%Y-%m-%d.md")
             file_path = f"{config.INBOX_PATH}/{filename}"
             
-            # Формирование YAML frontmatter
-            date_formatted = now.strftime("%Y-%m-%d %H:%M")
+            # Формирование заголовка с временем для новой голосовой заметки
+            time_formatted = now.strftime("%H:%M")
+            new_note = f"\n## {time_formatted} 🎤\n\n{transcribed_text}\n\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*\n"
             
-            # Формирование содержимого файла
-            content = f"""---
-type: voice-note
+            # Проверка существования файла
+            try:
+                # Файл существует - получаем его содержимое
+                file_content = self.repo.get_contents(file_path, ref="main")
+                existing_content = file_content.decoded_content.decode('utf-8')
+                
+                # Добавляем новую заметку в конец файла
+                updated_content = existing_content + new_note
+                
+                # Обновляем файл
+                commit_message = f"Add voice note to {filename} at {time_formatted}"
+                self.repo.update_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=updated_content,
+                    sha=file_content.sha,
+                    branch="main"
+                )
+                
+                return True, f"✅ Added voice note to {filename}"
+                
+            except GithubException as e:
+                if e.status == 404:
+                    # Файл не существует - создаём новый
+                    date_formatted = now.strftime("%Y-%m-%d")
+                    date_display = now.strftime("%d.%m.%Y")
+                    
+                    content = f"""---
 date: {date_formatted}
-tags: [inbox, telegram, voice]
-duration: {duration}s
-language: {language}
+tags: [inbox, telegram, daily]
 ---
 
-# 🎤 Голосовая заметка
+# Заметки за {date_display}
+
+## {time_formatted} 🎤
 
 {transcribed_text}
 
 ---
-*Источник: Telegram Voice Message • Длительность: {duration}с*
+*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*
 """
-            
-            # Создание файла в репозитории
-            commit_message = f"Add voice note from Telegram: {filename}"
-            self.repo.create_file(
-                path=file_path,
-                message=commit_message,
-                content=content,
-                branch="main"
-            )
-            
-            return True, f"✅ Saved voice note to {config.INBOX_PATH}"
+                    
+                    commit_message = f"Create daily note: {filename}"
+                    self.repo.create_file(
+                        path=file_path,
+                        message=commit_message,
+                        content=content,
+                        branch="main"
+                    )
+                    
+                    return True, f"✅ Created {filename} with voice note"
+                else:
+                    # Другая ошибка - пробрасываем дальше
+                    raise
             
         except GithubException as e:
             error_message = f"❌ Ошибка GitHub API: {e.status} - {e.data.get('message', 'Unknown error')}"
