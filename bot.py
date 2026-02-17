@@ -350,9 +350,10 @@ async def handle_voice_message(message: Message):
                         result=result,
                         original_text=transcribed_text,
                         is_voice=True,
-                        voice_metadata=voice_metadata
+                        voice_metadata=voice_metadata,
+                        status_message_id=status_message.message_id
                     )
-                    await status_message.delete()
+                    # Не удаляем status_message - он будет удален при финальном действии
                     logger.info(f"Smart Processing голосовой заметки успешно для пользователя {message.from_user.id}")
                     return
                 else:
@@ -483,9 +484,10 @@ async def handle_text_message(message: Message):
                 await interactive_handler.show_processing_preview(
                     message=message,
                     result=result,
-                    original_text=message.text
+                    original_text=message.text,
+                    status_message_id=status_message.message_id
                 )
-                await status_message.delete()
+                # Не удаляем status_message - он будет удален при финальном действии
                 logger.info(f"Smart Processing успешно для пользователя {message.from_user.id}")
                 return
             else:

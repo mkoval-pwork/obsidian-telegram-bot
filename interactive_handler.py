@@ -26,6 +26,8 @@ class ProcessingSession:
     edited: bool = False
     is_voice: bool = False
     voice_metadata: Optional[dict] = None
+    status_message_id: Optional[int] = None  # ID статусного сообщения для удаления
+    preview_message_id: Optional[int] = None  # ID превью сообщения для удаления
     
     def is_expired(self, timeout_minutes: int = 10) -> bool:
         """Проверка истечения сессии"""
@@ -46,7 +48,8 @@ class InteractiveHandler:
         result: ProcessingResult,
         original_text: str,
         is_voice: bool = False,
-        voice_metadata: Optional[dict] = None
+        voice_metadata: Optional[dict] = None,
+        status_message_id: Optional[int] = None
     ) -> None:
         """
         Показать превью обработанной заметки с inline кнопками
@@ -57,7 +60,21 @@ class InteractiveHandler:
             original_text: Исходный текст заметки
             is_voice: Флаг голосового сообщения
             voice_metadata: Метаданные голосового (duration, language)
+            status_message_id: ID статусного сообщения для последующего удаления
         """
+        # Генерация текста превью
+        preview_text = self._generate_preview_text_simple(result, is_voice, voice_metadata)
+        
+        # Создание клавиатуры
+        keyboard = self._create_inline_keyboard()
+        
+        # Отправка превью
+        preview_message = await message.answer(
+            preview_text,
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        
         # Создание сессии
         session = ProcessingSession(
             user_id=message.from_user.id,
@@ -66,24 +83,13 @@ class InteractiveHandler:
             result=result,
             created_at=datetime.now(),
             is_voice=is_voice,
-            voice_metadata=voice_metadata
+            voice_metadata=voice_metadata,
+            status_message_id=status_message_id,
+            preview_message_id=preview_message.message_id
         )
         
         # Сохранение сессии
         self.sessions[message.from_user.id] = session
-        
-        # Генерация текста превью
-        preview_text = self._generate_preview_text(session)
-        
-        # Создание клавиатуры
-        keyboard = self._create_inline_keyboard()
-        
-        # Отправка превью
-        await message.answer(
-            preview_text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
     
     async def handle_callback(
         self,
@@ -113,16 +119,12 @@ class InteractiveHandler:
         # Обработка действий
         if action == "approve":
             await self._handle_approve(callback, session)
-        elif action == "edit_tags":
-            await self._handle_edit_tags(callback, session)
-        elif action == "edit_summary":
-            await self._handle_edit_summary(callback, session)
         elif action == "edit_tasks":
             await self._handle_edit_tasks(callback, session)
         elif action == "regenerate":
             await self._handle_regenerate(callback, session)
-        elif action == "save_raw":
-            await self._handle_save_raw(callback, session)
+        elif action == "delete":
+            await self._handle_delete(callback, session)
         else:
             await callback.answer("❌ Неизвестное действие")
     
@@ -173,7 +175,7 @@ class InteractiveHandler:
         del self.edit_mode[user_id]
         
         # Обновление превью
-        preview_text = self._generate_preview_text(session)
+        preview_text = self._generate_preview_text_simple(session.result, session.is_voice, session.voice_metadata)
         keyboard = self._create_inline_keyboard()
         
         await message.answer(
@@ -184,19 +186,18 @@ class InteractiveHandler:
         
         return True
     
-    def _generate_preview_text(self, session: ProcessingSession) -> str:
-        """Генерация текста превью"""
-        result = session.result
-        
+    def _generate_preview_text_simple(self, result: ProcessingResult, is_voice: bool = False, 
+                                      voice_metadata: Optional[dict] = None) -> str:
+        """Генерация компактного текста превью"""
         tags_str = ", ".join(result.tags) if result.tags else "нет"
         tasks_count = len(result.action_items)
         tasks_str = "\n".join(f"- [ ] {task}" for task in result.action_items) if result.action_items else "нет"
         
         voice_info = ""
-        if session.is_voice and session.voice_metadata:
-            duration = session.voice_metadata.get("duration", 0)
-            language = session.voice_metadata.get("language", "unknown")
-            voice_info = f" 🎤 (Длительность: {duration}с, Язык: {language})"
+        if is_voice and voice_metadata:
+            duration = voice_metadata.get("duration", 0)
+            language = voice_metadata.get("language", "russian")
+            voice_info = f" 🎤 ({duration}с, {language})"
         
         preview = f"""🤖 **Smart Processing завершена!**{voice_info}
 
@@ -204,34 +205,22 @@ class InteractiveHandler:
 🏷️ **Tags:** {tags_str}
 ✅ **Задачи:** {tasks_count}
 
---- **Превью заметки** ---
-**Summary:** {result.summary}
-
-### Содержание
-{session.original_text[:300]}{"..." if len(session.original_text) > 300 else ""}
-
-### Задачи
 {tasks_str}
----
 
 Выберите действие:"""
         
         return preview
     
     def _create_inline_keyboard(self) -> InlineKeyboardMarkup:
-        """Создание inline клавиатуры"""
+        """Создание упрощенной inline клавиатуры"""
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Сохранить", callback_data="approve"),
-                InlineKeyboardButton(text="✏️ Теги", callback_data="edit_tags")
-            ],
-            [
-                InlineKeyboardButton(text="✏️ Резюме", callback_data="edit_summary"),
                 InlineKeyboardButton(text="✏️ Задачи", callback_data="edit_tasks")
             ],
             [
-                InlineKeyboardButton(text="🔄 Заново", callback_data="regenerate"),
-                InlineKeyboardButton(text="❌ Как есть", callback_data="save_raw")
+                InlineKeyboardButton(text="🔄 Перегенерировать", callback_data="regenerate"),
+                InlineKeyboardButton(text="🗑️ Удалить", callback_data="delete")
             ]
         ])
         return keyboard
@@ -259,37 +248,56 @@ class InteractiveHandler:
                 processing_result=session.result
             )
         
+        # Удаление промежуточных сообщений
+        await self._cleanup_messages(session, callback.message.chat.id)
+        
+        # Короткое финальное саммари
+        final_msg = self._generate_final_summary(session, success)
+        await self.bot.send_message(callback.message.chat.id, final_msg, parse_mode="Markdown")
+        
         # Удаление сессии
         del self.sessions[callback.from_user.id]
-        
-        await callback.message.edit_text(msg)
     
-    async def _handle_edit_tags(self, callback: CallbackQuery, session: ProcessingSession):
-        """Обработка: Редактировать теги"""
-        self.edit_mode[callback.from_user.id] = "tags"
-        
-        current_tags = ", ".join(session.result.tags)
-        
-        await callback.answer()
-        await callback.message.answer(
-            f"✏️ **Редактирование тегов**\n\n"
-            f"Текущие теги: `{current_tags}`\n\n"
-            f"Отправьте новые теги через запятую (английский, lowercase):\n"
-            f"Пример: `project, idea, urgent`",
-            parse_mode="Markdown"
-        )
+    async def _cleanup_messages(self, session: ProcessingSession, chat_id: int):
+        """Удаление промежуточных сообщений"""
+        try:
+            # Удаление статусного сообщения
+            if session.status_message_id:
+                try:
+                    await self.bot.delete_message(chat_id, session.status_message_id)
+                except Exception as e:
+                    logger.debug(f"Не удалось удалить статусное сообщение: {e}")
+            
+            # Удаление превью сообщения
+            if session.preview_message_id:
+                try:
+                    await self.bot.delete_message(chat_id, session.preview_message_id)
+                except Exception as e:
+                    logger.debug(f"Не удалось удалить превью сообщение: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщений: {e}")
     
-    async def _handle_edit_summary(self, callback: CallbackQuery, session: ProcessingSession):
-        """Обработка: Редактировать резюме"""
-        self.edit_mode[callback.from_user.id] = "summary"
+    def _generate_final_summary(self, session: ProcessingSession, success: bool) -> str:
+        """Генерация короткого финального саммари"""
+        if not success:
+            return "❌ Ошибка при сохранении заметки"
         
-        await callback.answer()
-        await callback.message.answer(
-            f"✏️ **Редактирование резюме**\n\n"
-            f"Текущее резюме: `{session.result.summary}`\n\n"
-            f"Отправьте новое резюме (макс 200 символов):",
-            parse_mode="Markdown"
+        result = session.result
+        tasks_count = len(result.action_items)
+        tags_count = len(result.tags)
+        
+        # Получение даты для имени файла
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        voice_emoji = "🎤 " if session.is_voice else ""
+        
+        summary = (
+            f"✅ {voice_emoji}Сохранено в `{today}.md`\n"
+            f"📝 {result.summary[:60]}...\n"
+            f"📊 {tasks_count} задач, {tags_count} тегов"
         )
+        
+        return summary
     
     async def _handle_edit_tasks(self, callback: CallbackQuery, session: ProcessingSession):
         """Обработка: Редактировать задачи"""
@@ -332,7 +340,7 @@ class InteractiveHandler:
         session.result = new_result
         
         # Показать новое превью
-        preview_text = self._generate_preview_text(session)
+        preview_text = self._generate_preview_text_simple(session.result, session.is_voice, session.voice_metadata)
         keyboard = self._create_inline_keyboard()
         
         await callback.message.edit_text(
@@ -341,28 +349,18 @@ class InteractiveHandler:
             parse_mode="Markdown"
         )
     
-    async def _handle_save_raw(self, callback: CallbackQuery, session: ProcessingSession):
-        """Обработка: Сохранить без обработки"""
-        from github_handler import GitHubHandler
+    async def _handle_delete(self, callback: CallbackQuery, session: ProcessingSession):
+        """Обработка: Удалить заметку (отменить сохранение)"""
+        await callback.answer("🗑️ Удалено")
         
-        await callback.answer("💾 Сохраняю без обработки...")
+        # Удаление промежуточных сообщений
+        await self._cleanup_messages(session, callback.message.chat.id)
         
-        gh_handler = GitHubHandler()
-        
-        if session.is_voice:
-            success, msg = gh_handler.create_voice_note(
-                transcribed_text=session.original_text,
-                duration=session.voice_metadata.get("duration", 0),
-                language=session.voice_metadata.get("language", "unknown"),
-                processed=False
-            )
-        else:
-            success, msg = gh_handler.create_note(
-                message_text=session.original_text,
-                processed=False
-            )
+        # Короткое уведомление
+        await self.bot.send_message(
+            callback.message.chat.id, 
+            "🗑️ Заметка не сохранена"
+        )
         
         # Удаление сессии
         del self.sessions[callback.from_user.id]
-        
-        await callback.message.edit_text(msg)
