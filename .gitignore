@@ -43,3 +43,6 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary commit messages
+commit_msg.txt
