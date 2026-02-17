@@ -18,10 +18,35 @@ class GitHubHandler:
         """Подключение к репозиторию"""
         try:
             self.repo = self.github.get_repo(config.GITHUB_REPO)
+            # Проверяем существование папки inbox
+            self._ensure_inbox_exists()
             return True
         except GithubException as e:
             print(f"Ошибка подключения к репозиторию: {e}")
             return False
+    
+    def _ensure_inbox_exists(self):
+        """Проверка и создание папки inbox если её нет"""
+        try:
+            # Пытаемся получить содержимое папки
+            self.repo.get_contents(config.INBOX_PATH)
+        except GithubException as e:
+            if e.status == 404:
+                # Папка не существует, создаём её через .gitkeep
+                print(f"Папка {config.INBOX_PATH} не найдена, создаю...")
+                try:
+                    self.repo.create_file(
+                        path=f"{config.INBOX_PATH}/.gitkeep",
+                        message=f"Create {config.INBOX_PATH} folder",
+                        content="",
+                        branch="main"
+                    )
+                    print(f"✅ Папка {config.INBOX_PATH} создана")
+                except Exception as create_error:
+                    print(f"⚠️ Не удалось создать папку: {create_error}")
+            else:
+                # Другая ошибка, игнорируем
+                pass
     
     def create_note(self, message_text: str) -> tuple[bool, str]:
         """
@@ -69,6 +94,72 @@ tags: [inbox, telegram]
             )
             
             return True, f"✅ Saved to {config.INBOX_PATH}"
+            
+        except GithubException as e:
+            error_message = f"❌ Ошибка GitHub API: {e.status} - {e.data.get('message', 'Unknown error')}"
+            print(error_message)
+            return False, error_message
+        except Exception as e:
+            error_message = f"❌ Неизвестная ошибка: {str(e)}"
+            print(error_message)
+            return False, error_message
+    
+    def create_voice_note(self, transcribed_text: str, duration: int, language: str = "ru") -> tuple[bool, str]:
+        """
+        Создание заметки из транскрибированного голосового сообщения
+        
+        Args:
+            transcribed_text: Транскрибированный текст
+            duration: Длительность аудио в секундах
+            language: Язык сообщения
+            
+        Returns:
+            tuple: (успех, сообщение)
+        """
+        if not self.repo:
+            if not self.connect_to_repo():
+                return False, "❌ Ошибка подключения к GitHub репозиторию"
+        
+        try:
+            # Получение текущего времени
+            now = datetime.now()
+            
+            # Формирование имени файла: YYYY-MM-DD_HHmmss_voice.md
+            filename = now.strftime("%Y-%m-%d_%H%M%S_voice.md")
+            
+            # Формирование пути к файлу
+            file_path = f"{config.INBOX_PATH}/{filename}"
+            
+            # Формирование YAML frontmatter
+            date_formatted = now.strftime("%Y-%m-%d %H:%M")
+            
+            # Формирование содержимого файла
+            content = f"""---
+type: voice-note
+date: {date_formatted}
+tags: [inbox, telegram, voice]
+duration: {duration}s
+language: {language}
+---
+
+# 🎤 Голосовая заметка
+
+{transcribed_text}
+
+---
+*Источник: Telegram Voice Message • Длительность: {duration}с*
+"""
+            
+            # Создание файла в репозитории
+            commit_message = f"Add voice note from Telegram: {filename}"
+            self.repo.create_file(
+                path=file_path,
+                message=commit_message,
+                content=content,
+                branch="main"
+            )
+            
+            return True, f"✅ Saved voice note to {config.INBOX_PATH}"
             
         except GithubException as e:
             error_message = f"❌ Ошибка GitHub API: {e.status} - {e.data.get('message', 'Unknown error')}"
