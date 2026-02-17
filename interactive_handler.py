@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from aiogram import Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from llm_processor import ProcessingResult
+from llm_processor import ProcessingResult, ActionItem
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -165,8 +165,24 @@ class InteractiveHandler:
         elif field_name == "summary":
             session.result.summary = new_value[:200]
         elif field_name == "tasks":
-            # Парсинг задач (по строкам)
-            tasks = [line.strip() for line in new_value.split("\n") if line.strip()]
+            # Парсинг задач (по строкам) с сохранением существующих дат/времени
+            tasks = []
+            for i, line in enumerate(new_value.split("\n")):
+                line = line.strip()
+                if line:
+                    # Если есть старая задача с тем же индексом, сохраняем её временные данные
+                    if i < len(session.result.action_items):
+                        old_task = session.result.action_items[i]
+                        tasks.append(ActionItem(
+                            text=line,
+                            date=old_task.date,
+                            time=old_task.time,
+                            priority=old_task.priority,
+                            tags=old_task.tags
+                        ))
+                    else:
+                        # Новая задача без временных данных
+                        tasks.append(ActionItem(text=line))
             session.result.action_items = tasks
         
         session.edited = True
@@ -191,7 +207,9 @@ class InteractiveHandler:
         """Генерация компактного текста превью"""
         tags_str = ", ".join(result.tags) if result.tags else "нет"
         tasks_count = len(result.action_items)
-        tasks_str = "\n".join(f"- [ ] {task}" for task in result.action_items) if result.action_items else "нет"
+        
+        # Используем метод to_markdown() для форматирования задач с датами
+        tasks_str = "\n".join(task.to_markdown() for task in result.action_items) if result.action_items else "нет"
         
         voice_info = ""
         if is_voice and voice_metadata:
@@ -199,11 +217,17 @@ class InteractiveHandler:
             language = voice_metadata.get("language", "russian")
             voice_info = f" 🎤 ({duration}с, {language})"
         
-        preview = f"""🤖 **Smart Processing завершена!**{voice_info}
+        # Информация о датах (если есть)
+        dates_info = ""
+        if result.dates_mentioned:
+            dates_count = len(result.dates_mentioned)
+            dates_info = f"\n📅 **Упомянутые даты:** {dates_count}"
+        
+        preview = f"""🤖 **Smart Processing v{result.processing_version} завершена!**{voice_info}
 
 📝 **Summary:** {result.summary}
 🏷️ **Tags:** {tags_str}
-✅ **Задачи:** {tasks_count}
+✅ **Задачи:** {tasks_count}{dates_info}
 
 {tasks_str}
 
@@ -303,14 +327,16 @@ class InteractiveHandler:
         """Обработка: Редактировать задачи"""
         self.edit_mode[callback.from_user.id] = "tasks"
         
-        current_tasks = "\n".join(session.result.action_items) if session.result.action_items else "нет"
+        # Показываем текущие задачи с markdown форматированием (с датами)
+        current_tasks = "\n".join(task.to_markdown() for task in session.result.action_items) if session.result.action_items else "нет"
         
         await callback.answer()
         await callback.message.answer(
             f"✏️ **Редактирование задач**\n\n"
             f"Текущие задачи:\n{current_tasks}\n\n"
             f"Отправьте новые задачи (по одной на строку):\n"
-            f"Пример:\n`Купить молоко\nПозвонить маме\nОтправить отчет`",
+            f"Пример:\n`Купить молоко\nПозвонить маме\nОтправить отчет`\n\n"
+            f"ℹ️ _Даты и время из старых задач будут сохранены_",
             parse_mode="Markdown"
         )
     

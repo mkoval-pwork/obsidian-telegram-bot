@@ -83,7 +83,8 @@ class GitHubHandler:
         # Задачи (если есть)
         tasks = ""
         if result.action_items:
-            tasks_list = "\n".join(f"- [ ] {task}" for task in result.action_items)
+            # Используем метод to_markdown() для форматирования с датами
+            tasks_list = "\n".join(task.to_markdown() for task in result.action_items)
             tasks = f"""
 ### Задачи
 
@@ -93,9 +94,9 @@ class GitHubHandler:
         if is_voice and voice_metadata:
             duration = voice_metadata.get("duration", 0)
             language = voice_metadata.get("language", "unknown")
-            footer = f"\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language} | Обработано: Smart Processing ({result.model_used})*\n"
+            footer = f"\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language} | Обработано: Smart Processing v{result.processing_version} ({result.model_used})*\n"
         else:
-            footer = f"\n---\n*Источник: Telegram | Обработано: Smart Processing ({result.model_used})*\n"
+            footer = f"\n---\n*Источник: Telegram | Обработано: Smart Processing v{result.processing_version} ({result.model_used})*\n"
         
         return f"\n{header}\n\n{summary}\n\n{content}{tasks}{footer}"
     
@@ -172,11 +173,19 @@ class GitHubHandler:
                     # Формирование frontmatter
                     if processed and processing_result:
                         tags = ['inbox', 'telegram'] + processing_result.tags
+                        
+                        # Добавление dates_mentioned если есть
+                        dates_line = ""
+                        if processing_result.dates_mentioned:
+                            dates_str = ', '.join(processing_result.dates_mentioned)
+                            dates_line = f"\ndates_mentioned: [{dates_str}]"
+                        
                         frontmatter = f"""---
 date: {date_formatted}
 tags: [{', '.join(tags)}]
 processed: true
 processing_model: {processing_result.model_used}
+processing_version: {processing_result.processing_version}{dates_line}
 ---"""
                         note_content = self._format_processed_note(
                             time_formatted=time_formatted,
@@ -302,11 +311,19 @@ processed: false
                     # Формирование frontmatter
                     if processed and processing_result:
                         tags = ['inbox', 'telegram', 'voice'] + processing_result.tags
+                        
+                        # Добавление dates_mentioned если есть
+                        dates_line = ""
+                        if processing_result.dates_mentioned:
+                            dates_str = ', '.join(processing_result.dates_mentioned)
+                            dates_line = f"\ndates_mentioned: [{dates_str}]"
+                        
                         frontmatter = f"""---
 date: {date_formatted}
 tags: [{', '.join(tags)}]
 processed: true
 processing_model: {processing_result.model_used}
+processing_version: {processing_result.processing_version}{dates_line}
 ---"""
                         voice_metadata = {"duration": duration, "language": language}
                         note_content = self._format_processed_note(
