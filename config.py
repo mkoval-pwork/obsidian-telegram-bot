@@ -18,6 +18,15 @@ GITHUB_REPO = os.getenv('GITHUB_REPO')
 # OpenAI настройки
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
+# Smart Processing настройки
+SMART_PROCESSING_ENABLED = os.getenv('SMART_PROCESSING_ENABLED', 'true').lower() == 'true'
+SMART_PROCESSING_MODEL = os.getenv('SMART_PROCESSING_MODEL', 'gpt-4o-mini')
+SMART_PROCESSING_TEMPERATURE = float(os.getenv('SMART_PROCESSING_TEMPERATURE', '0.3'))
+SMART_PROCESSING_MAX_TOKENS = int(os.getenv('SMART_PROCESSING_MAX_TOKENS', '500'))
+
+# Rate limiting для LLM
+MAX_LLM_REQUESTS_PER_HOUR = int(os.getenv('MAX_LLM_REQUESTS_PER_HOUR', '20'))
+
 # Путь для сохранения заметок в репозитории
 INBOX_PATH = '00_Inbox'
 
@@ -33,4 +42,6 @@ if not ALLOWED_USER_ID:
 
 # OpenAI API необязателен, но нужен для транскрипции голосовых сообщений
 if not OPENAI_API_KEY:
-    print("⚠️ OPENAI_API_KEY не установлен - голосовые сообщения не будут работать")
+    print("⚠️ OPENAI_API_KEY не установлен - голосовые сообщения и Smart Processing не будут работать")
+elif SMART_PROCESSING_ENABLED:
+    print(f"✅ Smart Processing включен (модель: {SMART_PROCESSING_MODEL})")

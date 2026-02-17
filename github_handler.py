@@ -48,12 +48,70 @@ class GitHubHandler:
                 # Другая ошибка, игнорируем
                 pass
     
-    def create_note(self, message_text: str) -> tuple[bool, str]:
+    def _format_processed_note(
+        self,
+        time_formatted: str,
+        message_text: str,
+        result,
+        is_voice: bool = False,
+        voice_metadata: dict = None
+    ) -> str:
+        """
+        Форматирование обработанной заметки
+        
+        Args:
+            time_formatted: Время в формате HH:MM
+            message_text: Исходный текст
+            result: ProcessingResult с данными обработки
+            is_voice: Флаг голосового сообщения
+            voice_metadata: Метаданные голосового (duration, language)
+            
+        Returns:
+            Отформатированная заметка
+        """
+        # Заголовок с эмодзи для голосовых
+        header = f"## {time_formatted} 🎤" if is_voice else f"## {time_formatted}"
+        
+        # Summary
+        summary = f"**Summary:** {result.summary}"
+        
+        # Содержание
+        content = f"""### Содержание
+
+{message_text}"""
+        
+        # Задачи (если есть)
+        tasks = ""
+        if result.action_items:
+            tasks_list = "\n".join(f"- [ ] {task}" for task in result.action_items)
+            tasks = f"""
+### Задачи
+
+{tasks_list}"""
+        
+        # Футер
+        if is_voice and voice_metadata:
+            duration = voice_metadata.get("duration", 0)
+            language = voice_metadata.get("language", "unknown")
+            footer = f"\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language} | Обработано: Smart Processing ({result.model_used})*\n"
+        else:
+            footer = f"\n---\n*Источник: Telegram | Обработано: Smart Processing ({result.model_used})*\n"
+        
+        return f"\n{header}\n\n{summary}\n\n{content}{tasks}{footer}"
+    
+    def create_note(
+        self, 
+        message_text: str,
+        processed: bool = False,
+        processing_result = None
+    ) -> tuple[bool, str]:
         """
         Создание заметки в GitHub репозитории (добавление в дневной файл)
         
         Args:
             message_text: Текст сообщения из Telegram
+            processed: Флаг обработки через LLM
+            processing_result: Результат обработки (если processed=True)
             
         Returns:
             tuple: (успех, сообщение)
@@ -72,7 +130,17 @@ class GitHubHandler:
             
             # Формирование заголовка с временем для новой заметки
             time_formatted = now.strftime("%H:%M")
-            new_note = f"\n## {time_formatted}\n\n{message_text}\n"
+            
+            # Формирование заметки в зависимости от обработки
+            if processed and processing_result:
+                new_note = self._format_processed_note(
+                    time_formatted=time_formatted,
+                    message_text=message_text,
+                    result=processing_result,
+                    is_voice=False
+                )
+            else:
+                new_note = f"\n## {time_formatted}\n\n{message_text}\n"
             
             # Проверка существования файла
             try:
@@ -101,16 +169,36 @@ class GitHubHandler:
                     date_formatted = now.strftime("%Y-%m-%d")
                     date_display = now.strftime("%d.%m.%Y")
                     
-                    content = f"""---
+                    # Формирование frontmatter
+                    if processed and processing_result:
+                        tags = ['inbox', 'telegram'] + processing_result.tags
+                        frontmatter = f"""---
 date: {date_formatted}
-tags: [inbox, telegram, daily]
----
+tags: [{', '.join(tags)}]
+processed: true
+processing_model: {processing_result.model_used}
+---"""
+                        note_content = self._format_processed_note(
+                            time_formatted=time_formatted,
+                            message_text=message_text,
+                            result=processing_result,
+                            is_voice=False
+                        ).lstrip('\n')
+                    else:
+                        frontmatter = f"""---
+date: {date_formatted}
+tags: [inbox, telegram, unprocessed]
+processed: false
+---"""
+                        note_content = f"""## {time_formatted}
+
+{message_text}"""
+                    
+                    content = f"""{frontmatter}
 
 # Заметки за {date_display}
 
-## {time_formatted}
-
-{message_text}
+{note_content}
 """
                     
                     commit_message = f"Create daily note: {filename}"
@@ -135,7 +223,14 @@ tags: [inbox, telegram, daily]
             print(error_message)
             return False, error_message
     
-    def create_voice_note(self, transcribed_text: str, duration: int, language: str = "ru") -> tuple[bool, str]:
+    def create_voice_note(
+        self,
+        transcribed_text: str,
+        duration: int,
+        language: str = "ru",
+        processed: bool = False,
+        processing_result = None
+    ) -> tuple[bool, str]:
         """
         Создание заметки из транскрибированного голосового сообщения (добавление в дневной файл)
         
@@ -143,6 +238,8 @@ tags: [inbox, telegram, daily]
             transcribed_text: Транскрибированный текст
             duration: Длительность аудио в секундах
             language: Язык сообщения
+            processed: Флаг обработки через LLM
+            processing_result: Результат обработки (если processed=True)
             
         Returns:
             tuple: (успех, сообщение)
@@ -161,7 +258,19 @@ tags: [inbox, telegram, daily]
             
             # Формирование заголовка с временем для новой голосовой заметки
             time_formatted = now.strftime("%H:%M")
-            new_note = f"\n## {time_formatted} 🎤\n\n{transcribed_text}\n\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*\n"
+            
+            # Формирование заметки в зависимости от обработки
+            if processed and processing_result:
+                voice_metadata = {"duration": duration, "language": language}
+                new_note = self._format_processed_note(
+                    time_formatted=time_formatted,
+                    message_text=transcribed_text,
+                    result=processing_result,
+                    is_voice=True,
+                    voice_metadata=voice_metadata
+                )
+            else:
+                new_note = f"\n## {time_formatted} 🎤\n\n{transcribed_text}\n\n---\n*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*\n"
             
             # Проверка существования файла
             try:
@@ -190,19 +299,41 @@ tags: [inbox, telegram, daily]
                     date_formatted = now.strftime("%Y-%m-%d")
                     date_display = now.strftime("%d.%m.%Y")
                     
-                    content = f"""---
+                    # Формирование frontmatter
+                    if processed and processing_result:
+                        tags = ['inbox', 'telegram', 'voice'] + processing_result.tags
+                        frontmatter = f"""---
 date: {date_formatted}
-tags: [inbox, telegram, daily]
----
-
-# Заметки за {date_display}
-
-## {time_formatted} 🎤
+tags: [{', '.join(tags)}]
+processed: true
+processing_model: {processing_result.model_used}
+---"""
+                        voice_metadata = {"duration": duration, "language": language}
+                        note_content = self._format_processed_note(
+                            time_formatted=time_formatted,
+                            message_text=transcribed_text,
+                            result=processing_result,
+                            is_voice=True,
+                            voice_metadata=voice_metadata
+                        ).lstrip('\n')
+                    else:
+                        frontmatter = f"""---
+date: {date_formatted}
+tags: [inbox, telegram, voice, unprocessed]
+processed: false
+---"""
+                        note_content = f"""## {time_formatted} 🎤
 
 {transcribed_text}
 
 ---
-*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*
+*Источник: Telegram Voice Message • Длительность: {duration}с • Язык: {language}*"""
+                    
+                    content = f"""{frontmatter}
+
+# Заметки за {date_display}
+
+{note_content}
 """
                     
                     commit_message = f"Create daily note: {filename}"

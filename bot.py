@@ -10,11 +10,13 @@ from datetime import datetime, timedelta
 from typing import Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from openai import OpenAI
 
 import config
 from github_handler import GitHubHandler
+from llm_processor import process_text
+from interactive_handler import InteractiveHandler
 
 # Настройка логирования
 logging.basicConfig(
@@ -42,8 +44,12 @@ openai_client: Optional[OpenAI] = None
 if config.OPENAI_API_KEY:
     openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
-# Rate limiting для голосовых сообщений
+# Инициализация Interactive Handler
+interactive_handler = InteractiveHandler(bot)
+
+# Rate limiting для голосовых сообщений и LLM
 voice_requests = defaultdict(list)
+llm_requests = defaultdict(list)
 
 
 def is_authorized(user_id: int) -> bool:
@@ -83,6 +89,34 @@ def check_voice_rate_limit(user_id: int) -> tuple[bool, int]:
     # Добавляем текущий запрос
     voice_requests[user_id].append(now)
     remaining = MAX_VOICE_PER_HOUR - current_count - 1
+    
+    return True, remaining
+
+
+def check_llm_rate_limit(user_id: int) -> tuple[bool, int]:
+    """
+    Проверка rate limit для LLM запросов
+    
+    Args:
+        user_id: ID пользователя Telegram
+        
+    Returns:
+        tuple: (разрешено, количество оставшихся запросов)
+    """
+    now = datetime.now()
+    hour_ago = now - timedelta(hours=1)
+    
+    # Очищаем старые запросы
+    llm_requests[user_id] = [t for t in llm_requests[user_id] if t > hour_ago]
+    
+    current_count = len(llm_requests[user_id])
+    
+    if current_count >= config.MAX_LLM_REQUESTS_PER_HOUR:
+        return False, 0
+    
+    # Регистрируем текущий запрос
+    llm_requests[user_id].append(now)
+    remaining = config.MAX_LLM_REQUESTS_PER_HOUR - current_count - 1
     
     return True, remaining
 
@@ -148,6 +182,12 @@ async def cmd_start(message: Message):
         "/start - это сообщение\n"
         "/help - помощь"
     )
+
+
+@dp.callback_query()
+async def handle_callback_query(callback: CallbackQuery):
+    """Обработчик callback queries от inline кнопок"""
+    await interactive_handler.handle_callback(callback)
 
 
 @dp.message(Command("help"))
@@ -285,14 +325,59 @@ async def handle_voice_message(message: Message):
             f"Длина текста: {len(transcribed_text)}"
         )
         
-        # Обновление статуса
+        # НОВОЕ: Smart Processing для голосовых
+        if config.SMART_PROCESSING_ENABLED and openai_client:
+            # Проверка rate limit для LLM
+            allowed, remaining_llm = check_llm_rate_limit(message.from_user.id)
+            
+            if allowed:
+                # Обработка через LLM
+                await status_message.edit_text("🤖 Обрабатываю через AI...")
+                
+                result = await process_text(
+                    text=transcribed_text,
+                    language=detected_language
+                )
+                
+                if result.success:
+                    # Показать интерактивное превью
+                    voice_metadata = {
+                        "duration": duration,
+                        "language": detected_language
+                    }
+                    await interactive_handler.show_processing_preview(
+                        message=message,
+                        result=result,
+                        original_text=transcribed_text,
+                        is_voice=True,
+                        voice_metadata=voice_metadata
+                    )
+                    await status_message.delete()
+                    logger.info(f"Smart Processing голосовой заметки успешно для пользователя {message.from_user.id}")
+                    return
+                else:
+                    # LLM не сработал - продолжить без обработки
+                    logger.warning(f"Smart Processing failed for voice: {result.error_message}")
+                    await status_message.edit_text(
+                        f"⚠️ AI обработка не удалась.\n"
+                        f"Сохраняю голосовую заметку без обработки..."
+                    )
+            else:
+                # Rate limit превышен
+                await status_message.edit_text(
+                    f"⏸ Превышен лимит AI обработки.\n"
+                    f"Сохраняю голосовую заметку без обработки..."
+                )
+        
+        # Fallback: сохранение без обработки
         await status_message.edit_text("💾 Сохраняю заметку...")
         
         # Создание заметки в GitHub
         success, result_message = github_handler.create_voice_note(
             transcribed_text=transcribed_text,
             duration=duration,
-            language=detected_language
+            language=detected_language,
+            processed=False
         )
         
         # Формирование итогового сообщения с превью транскрипции
@@ -356,14 +441,66 @@ async def handle_text_message(message: Message):
         await message.answer("❌ Поддерживаются только текстовые сообщения")
         return
     
+    # Проверка режима редактирования
+    if await interactive_handler.handle_edit_response(message):
+        return  # Сообщение обработано как редактирование
+    
     logger.info(f"Получено сообщение от пользователя {message.from_user.id}")
     
     # Отправка уведомления о начале обработки
     status_message = await message.answer("⏳ Сохраняю заметку...")
     
     try:
-        # Создание заметки в GitHub
-        success, result_message = github_handler.create_note(message.text)
+        # НОВОЕ: Smart Processing
+        if config.SMART_PROCESSING_ENABLED and openai_client:
+            # Проверка rate limit
+            allowed, remaining = check_llm_rate_limit(message.from_user.id)
+            
+            if not allowed:
+                await status_message.edit_text(
+                    f"⏸ Превышен лимит AI обработки.\n"
+                    f"Максимум: {config.MAX_LLM_REQUESTS_PER_HOUR} запросов в час.\n"
+                    f"Заметка будет сохранена без обработки."
+                )
+                # Fallback: сохранить без обработки
+                success, result_message = github_handler.create_note(
+                    message.text,
+                    processed=False
+                )
+                await status_message.edit_text(result_message)
+                return
+            
+            # Обработка через LLM
+            await status_message.edit_text("🤖 Обрабатываю через AI...")
+            
+            result = await process_text(
+                text=message.text,
+                language="ru"
+            )
+            
+            if result.success:
+                # Показать интерактивное превью
+                await interactive_handler.show_processing_preview(
+                    message=message,
+                    result=result,
+                    original_text=message.text
+                )
+                await status_message.delete()
+                logger.info(f"Smart Processing успешно для пользователя {message.from_user.id}")
+                return
+            else:
+                # LLM не сработал - сохранить без обработки
+                logger.warning(f"Smart Processing failed: {result.error_message}")
+                await status_message.edit_text(
+                    f"⚠️ Не удалось обработать через AI: {result.error_message}\n"
+                    f"Сохраняю заметку без обработки..."
+                )
+        
+        # Fallback или Smart Processing отключен: сохранить без обработки
+        success, result_message = github_handler.create_note(
+            message.text,
+            processed=False
+        )
         
         # Обновление статусного сообщения
         await status_message.edit_text(result_message)
