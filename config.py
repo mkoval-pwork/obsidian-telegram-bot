@@ -2,7 +2,11 @@
 Конфигурация бота
 """
 import os
+import logging
 from dotenv import load_dotenv
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -42,6 +46,6 @@ if not ALLOWED_USER_ID:
 
 # OpenAI API необязателен, но нужен для транскрипции голосовых сообщений
 if not OPENAI_API_KEY:
-    print("⚠️ OPENAI_API_KEY не установлен - голосовые сообщения и Smart Processing не будут работать")
+    logger.warning("⚠️ OPENAI_API_KEY не установлен - голосовые сообщения и Smart Processing не будут работать")
 elif SMART_PROCESSING_ENABLED:
-    print(f"✅ Smart Processing включен (модель: {SMART_PROCESSING_MODEL})")
+    logger.info(f"✅ Smart Processing включен (модель: {SMART_PROCESSING_MODEL})")

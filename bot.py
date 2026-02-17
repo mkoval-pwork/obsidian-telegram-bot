@@ -121,6 +121,66 @@ def check_llm_rate_limit(user_id: int) -> tuple[bool, int]:
     return True, remaining
 
 
+async def _process_with_smart_processing(
+    message: Message,
+    text: str,
+    language: str,
+    status_message: Message,
+    is_voice: bool = False,
+    voice_metadata: dict = None
+) -> bool:
+    """
+    Общая логика обработки через Smart Processing
+    
+    Args:
+        message: Исходное сообщение от пользователя
+        text: Текст для обработки
+        language: Язык текста
+        status_message: Статусное сообщение для обновления
+        is_voice: Флаг голосового сообщения
+        voice_metadata: Метаданные голосового (duration, language)
+        
+    Returns:
+        bool: True если обработка прошла успешно, False если нужен fallback
+    """
+    # Проверка rate limit
+    allowed, remaining = check_llm_rate_limit(message.from_user.id)
+    
+    if not allowed:
+        await status_message.edit_text(
+            f"⏸ Превышен лимит AI обработки.\n"
+            f"Максимум: {config.MAX_LLM_REQUESTS_PER_HOUR} запросов в час.\n"
+            f"Заметка будет сохранена без обработки."
+        )
+        return False  # Fallback к обычному сохранению
+    
+    # Обработка через LLM
+    await status_message.edit_text("🤖 Обрабатываю через AI...")
+    
+    result = await process_text(text=text, language=language)
+    
+    if result.success:
+        # Показать интерактивное превью
+        await interactive_handler.show_processing_preview(
+            message=message,
+            result=result,
+            original_text=text,
+            is_voice=is_voice,
+            voice_metadata=voice_metadata,
+            status_message_id=status_message.message_id
+        )
+        logger.info(f"Smart Processing успешно для пользователя {message.from_user.id}")
+        return True
+    else:
+        # LLM не сработал - fallback
+        logger.warning(f"Smart Processing failed: {result.error_message}")
+        await status_message.edit_text(
+            f"⚠️ Не удалось обработать через AI: {result.error_message}\n"
+            f"Сохраняю заметку без обработки..."
+        )
+        return False
+
+
 async def transcribe_audio_with_retry(audio_file_path: str) -> tuple[bool, str, str]:
     """
     Транскрибация аудио с повторными попытками
@@ -327,48 +387,19 @@ async def handle_voice_message(message: Message):
         
         # НОВОЕ: Smart Processing для голосовых
         if config.SMART_PROCESSING_ENABLED and openai_client:
-            # Проверка rate limit для LLM
-            allowed, remaining_llm = check_llm_rate_limit(message.from_user.id)
+            voice_metadata = {"duration": duration, "language": detected_language}
             
-            if allowed:
-                # Обработка через LLM
-                await status_message.edit_text("🤖 Обрабатываю через AI...")
-                
-                result = await process_text(
-                    text=transcribed_text,
-                    language=detected_language
-                )
-                
-                if result.success:
-                    # Показать интерактивное превью
-                    voice_metadata = {
-                        "duration": duration,
-                        "language": detected_language
-                    }
-                    await interactive_handler.show_processing_preview(
-                        message=message,
-                        result=result,
-                        original_text=transcribed_text,
-                        is_voice=True,
-                        voice_metadata=voice_metadata,
-                        status_message_id=status_message.message_id
-                    )
-                    # Не удаляем status_message - он будет удален при финальном действии
-                    logger.info(f"Smart Processing голосовой заметки успешно для пользователя {message.from_user.id}")
-                    return
-                else:
-                    # LLM не сработал - продолжить без обработки
-                    logger.warning(f"Smart Processing failed for voice: {result.error_message}")
-                    await status_message.edit_text(
-                        f"⚠️ AI обработка не удалась.\n"
-                        f"Сохраняю голосовую заметку без обработки..."
-                    )
-            else:
-                # Rate limit превышен
-                await status_message.edit_text(
-                    f"⏸ Превышен лимит AI обработки.\n"
-                    f"Сохраняю голосовую заметку без обработки..."
-                )
+            processed = await _process_with_smart_processing(
+                message=message,
+                text=transcribed_text,
+                language=detected_language,
+                status_message=status_message,
+                is_voice=True,
+                voice_metadata=voice_metadata
+            )
+            
+            if processed:
+                return  # Обработка завершена через interactive handler
         
         # Fallback: сохранение без обработки
         await status_message.edit_text("💾 Сохраняю заметку...")
@@ -454,49 +485,16 @@ async def handle_text_message(message: Message):
     try:
         # НОВОЕ: Smart Processing
         if config.SMART_PROCESSING_ENABLED and openai_client:
-            # Проверка rate limit
-            allowed, remaining = check_llm_rate_limit(message.from_user.id)
-            
-            if not allowed:
-                await status_message.edit_text(
-                    f"⏸ Превышен лимит AI обработки.\n"
-                    f"Максимум: {config.MAX_LLM_REQUESTS_PER_HOUR} запросов в час.\n"
-                    f"Заметка будет сохранена без обработки."
-                )
-                # Fallback: сохранить без обработки
-                success, result_message = github_handler.create_note(
-                    message.text,
-                    processed=False
-                )
-                await status_message.edit_text(result_message)
-                return
-            
-            # Обработка через LLM
-            await status_message.edit_text("🤖 Обрабатываю через AI...")
-            
-            result = await process_text(
+            processed = await _process_with_smart_processing(
+                message=message,
                 text=message.text,
-                language="ru"
+                language="ru",
+                status_message=status_message,
+                is_voice=False
             )
             
-            if result.success:
-                # Показать интерактивное превью
-                await interactive_handler.show_processing_preview(
-                    message=message,
-                    result=result,
-                    original_text=message.text,
-                    status_message_id=status_message.message_id
-                )
-                # Не удаляем status_message - он будет удален при финальном действии
-                logger.info(f"Smart Processing успешно для пользователя {message.from_user.id}")
-                return
-            else:
-                # LLM не сработал - сохранить без обработки
-                logger.warning(f"Smart Processing failed: {result.error_message}")
-                await status_message.edit_text(
-                    f"⚠️ Не удалось обработать через AI: {result.error_message}\n"
-                    f"Сохраняю заметку без обработки..."
-                )
+            if processed:
+                return  # Обработка завершена через interactive handler
         
         # Fallback или Smart Processing отключен: сохранить без обработки
         success, result_message = github_handler.create_note(

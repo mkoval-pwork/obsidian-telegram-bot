@@ -11,7 +11,7 @@ from datetime import datetime
 from openai import OpenAI, OpenAIError
 
 import config
-from date_parser import DateParser, extract_priority, normalize_date_for_obsidian
+from utils import extract_priority, normalize_date_for_obsidian
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
