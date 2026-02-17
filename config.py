@@ -15,6 +15,9 @@ ALLOWED_USER_ID = int(os.getenv('ALLOWED_USER_ID', 0))
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_REPO = os.getenv('GITHUB_REPO')
 
+# OpenAI настройки
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
 # Путь для сохранения заметок в репозитории
 INBOX_PATH = '00_Inbox'
 
@@ -27,3 +30,7 @@ if not GITHUB_REPO:
     raise ValueError("GITHUB_REPO не установлен в .env файле")
 if not ALLOWED_USER_ID:
     raise ValueError("ALLOWED_USER_ID не установлен в .env файле")
+
+# OpenAI API необязателен, но нужен для транскрипции голосовых сообщений
+if not OPENAI_API_KEY:
+    print("⚠️ OPENAI_API_KEY не установлен - голосовые сообщения не будут работать")

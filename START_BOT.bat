@@ -7,12 +7,24 @@ echo.
 
 cd /d "%~dp0"
 
-set PYTHON=C:\Users\Maksim\AppData\Local\Programs\Python\Python314\python.exe
+REM Попытка найти Python в разных местах
+where python >nul 2>&1
+if %errorlevel% equ 0 (
+    set PYTHON=python
+) else (
+    where py >nul 2>&1
+    if %errorlevel% equ 0 (
+        set PYTHON=py
+    ) else (
+        set PYTHON=C:\Users\Maksim\AppData\Local\Programs\Python\Python314\python.exe
+    )
+)
 
 echo Checking Python...
 "%PYTHON%" --version
 if %errorlevel% neq 0 (
     echo [ERROR] Python not found!
+    echo Please install Python from https://python.org
     pause
     exit /b 1
 )
