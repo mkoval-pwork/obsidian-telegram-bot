@@ -79,6 +79,7 @@ chmod +x deploy.sh
 
 📚 **[Подробная инструкция VPS →](DEPLOY_VPS.md)**  
 ⚡ **[Быстрый старт VPS →](QUICK_START_VPS.md)**  
+🚀 **[Автоматический деплой →](AUTO_DEPLOY_SETUP.md)** - обновление по git push  
 📖 **[Шпаргалка команд →](CHEATSHEET.md)**
 
 ## 📋 Требования

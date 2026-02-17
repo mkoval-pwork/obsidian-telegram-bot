@@ -1,0 +1,32 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Позволяет запускать вручную
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            cd /root/obsidian-telegram-bot || exit 1
+            echo "📥 Pulling latest changes from GitHub..."
+            git pull origin main
+            echo "🔄 Restarting Docker container..."
+            docker-compose down
+            docker-compose up -d --build
+            echo "✅ Deployment completed!"
+            echo "📊 Checking container status..."
+            docker-compose ps
+            sleep 3
+            echo "📋 Recent logs:"
+            docker-compose logs --tail=20 obsidian-bot
